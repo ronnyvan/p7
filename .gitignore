@@ -1,0 +1,16 @@
+*.debug
+/build/
+.nfs*
+*.data
+*.cycles
+*.time
+*.failure
+*.raw
+*.out
+*.result
+*.diff
+disks/
+all_tests/
+all_results/
+my_results/
+my_submission/
