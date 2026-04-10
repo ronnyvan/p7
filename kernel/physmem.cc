@@ -129,7 +129,7 @@ PPN PhysMem::alloc() {
 }
 
 void PhysMem::free(PPN ppn) {
-  SAY("freeing ?\n", ppn);
+  // SAY("freeing ?\n", ppn);
   impl::AvailFrame *frame = VA(PA(ppn));
   lock.lock();
   frame->next = avail;

@@ -46,16 +46,12 @@ inline VPN::VPN(const VA &va) : _val(va.va() >> LOG_FRAME_SIZE) {}
 
 namespace impl {
 void map(VPN vpn, PPN ppn, bool user, bool write);
-static inline void map_range(VA start, uint64_t length, bool user, bool write) {
-  for (uint64_t i = 0; i < length; i += FRAME_SIZE) {
-    map(VPN(VA(start.va() + i)), physMem.alloc(), user, write);
-  }
-}
+void map_range(VA start, uint64_t size, bool user, bool write);
 extern uint64_t common_cr3;
 } // namespace impl
 
 namespace VMM {
-enum flags { MAP_SHARED, MAP_ANONYMOUS };
+enum flags { MAP_SHARED = 1, MAP_ANONYMOUS = 2};
 
 extern void init_system();
 extern void init_core();

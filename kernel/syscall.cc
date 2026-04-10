@@ -17,6 +17,33 @@
 #include "print.h"
 #include "thread.h"
 
+namespace {
+
+constexpr uint64_t userTopExclusive = UINT64_C(0x0000800000000000);
+
+bool is_valid_user_buffer(uint64_t ptr, uint64_t len) {
+  if (len == 0) {
+    return true;
+  }
+
+  if (ptr >= userTopExclusive) {
+    return false;
+  }
+
+  auto last = ptr + len - 1;
+  if (last < ptr) {
+    return false;
+  }
+
+  if (last >= userTopExclusive) {
+    return false;
+  }
+
+  return true;
+}
+
+} // namespace
+
 struct SyscallFrame {
   uint64_t rax;
   uint64_t rbx;
@@ -42,14 +69,25 @@ syscallHandler(SyscallFrame *frame) {
   switch (frame->rax) {
   case 1: /* write */
   {
-    /* think of all the things that could go wrong here */
-    /* how can a malicious user exploit this? */
+    if (frame->rdi != 1) {
+      return -1;
+    }
+
+    if (!is_valid_user_buffer(frame->rsi, frame->rdx)) {
+      return -1;
+    }
+
     char *buffer = (char *)frame->rsi;
     uint64_t len = frame->rdx;
     for (uint64_t i = 0; i < len; i++) {
       putch(buffer[i]);
     }
-    return len;
+    return (int)len;
+  }
+  case 60: /* exit */
+  {
+    (void)frame->rdi;
+    Thread::stop();
   }
   default:
     SAY("syscall ?\n", Dec(frame->rax));
