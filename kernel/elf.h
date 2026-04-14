@@ -6,7 +6,8 @@
 
 class ELF {
 public:
-    static uint64_t load(StrongRef<Node> file);
+
+    static uint64_t load(StrongRef<Node> file, uint64_t* end_addr = nullptr);
 };
 
 struct ElfHeader {

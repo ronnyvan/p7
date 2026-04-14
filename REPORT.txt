@@ -1,14 +1,35 @@
 * Why is it a bad idea to run system calls and interrupt
   handlers on the user stack?
+  The user controls that stack. If kernel code runs on it, user code can
+  change,unmap, or race on the memory holding kernel return state. That can
+  cause crashes or corrupt kernel control flow or leak data. 
 
 * Can you craft a test case that breaks a kernel that does that?
+  Yes... set RSP near a page boundary, leave next page unmapped, then issue a
+  syscall in a tight loop. If the kernel pushes state on user RSP, it will hit
+  the unmapped page and fault in kernel mode. Another variant is sharing that
+  stack page and having another thread modify it while the syscall runs.
 
 * How can you defend against such attacks?
+  Switch to a perthread kernel stack immediately on entry , 
+  save user RSP in trusted percore/per thread storage, and only
+  return to it at exit. Also validate user pointers/ranges before dereference,
+  and do checked copyin/copyout instead of direct user pointer access.
 
 * How can a malicious user exploit my naive implementation of write?
+  If write directly dereferences user pointers, attacker can pass 
+  an unmapped pointer -> kernel page fault/panic, a kernel-space pointer -> kernel 
+  memory disclosure to stdout, a buffer crossing mapped->unmapped pages -> mid-copy kernel fault,
+  weird length values -> overflow/wraparound bugs in range checks
 
 * explain the use of the [[gnu::force_align_arg_pointer]] attribute on
   some functions. Why those functions? Why not all functions?
+
+  Those are entry points reached from written assembly (syscall/trap/
+  context switch paths), where stack alignment may not follow normal C Application Binary Interface
+  rules. The attribute forces a safe stack realignment prologue so compiler
+  generated code does not assume bad alignment. Regular C calls already
+  follow the Application Binary Interface, so adding it everywhere is unnecessary overhead.
 
 
 

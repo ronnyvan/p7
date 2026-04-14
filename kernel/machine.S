@@ -352,7 +352,10 @@ switch_to_user:
 	.extern syscallHandler
 	.global syscallHandler_
 syscallHandler_:
-    // save caller state
+    // Save user RSP in TSS.rsp1 scratch (gs:28), switch to kernel RSP (gs:20).
+	mov %rsp, %gs:28
+	mov %gs:20, %rsp
+
 
 	push %r15
 	push %r14
@@ -389,8 +392,34 @@ syscallHandler_:
 	pop %r14
 	pop %r15
 
+	mov %gs:28, %rsp
+
+
     sysretq
-	
+
+	.global fork_return_to_user
+fork_return_to_user:
+	mov %rsi, %gs:28
+	mov %rdi, %rsp
+	add $8, %rsp
+	pop %rbx
+	pop %rcx
+	pop %rdx
+	pop %rsi
+	pop %rdi
+	pop %rbp
+	pop %r8
+	pop %r9
+	pop %r10
+	pop %r11
+	pop %r12
+	pop %r13
+	pop %r14
+	pop %r15
+	mov %gs:28, %rsp
+	xor %eax, %eax
+	sysretq
+
 
 	.section .note.GNU-stack,"",@progbits
 	

@@ -77,6 +77,41 @@ inline uint64_t *leafPte(uint64_t va) {
   return &table[vpnIndex(vpn, 0)];
 }
 
+PPN cloneTableSubtree(PPN srcTablePpn, uint32_t level) {
+  auto dstTablePpn = physMem.alloc();
+  auto src = (uint64_t *)VA(srcTablePpn);
+  auto dst = (uint64_t *)VA(dstTablePpn);
+
+  for (uint64_t i = 0; i < 512; i++) {
+    dst[i] = 0;
+  }
+
+  for (uint64_t i = 0; i < 512; i++) {
+    auto entry = src[i];
+    if ((entry & presentBit) == 0) {
+      continue;
+    }
+
+    if (level == 0) {
+      auto srcFrame = entryPpn(entry);
+      auto dstFrame = physMem.alloc();
+      auto srcBytes = (char *)VA(srcFrame);
+      auto dstBytes = (char *)VA(dstFrame);
+      for (uint64_t j = 0; j < FRAME_SIZE; j++) {
+        dstBytes[j] = srcBytes[j];
+      }
+      dst[i] = (dstFrame.ppn() << LOG_FRAME_SIZE) | (entry & ~addressMask);
+      continue;
+    }
+
+    auto srcChild = entryPpn(entry);
+    auto dstChild = cloneTableSubtree(srcChild, level - 1);
+    dst[i] = (dstChild.ppn() << LOG_FRAME_SIZE) | (entry & ~addressMask);
+  }
+
+  return dstTablePpn;
+}
+
 inline void unmapPage(uint64_t va) {
   auto pte = leafPte(va);
   if (pte == nullptr) {
@@ -225,7 +260,198 @@ thread_local VME *privateVmes = nullptr;
 VME *sharedVmes = nullptr;
 SpinLock sharedLock{};
 
+thread_local uint64_t heapStart = 0;
+thread_local uint64_t heapBreak = 0;
+
+VME *clonePrivateVmes() {
+  VME *head = nullptr;
+  VME **tail = &head;
+
+  auto cur = privateVmes;
+  while (cur != nullptr) {
+    auto node = new VME();
+    node->start = cur->start;
+    node->end = cur->end;
+    node->shared = cur->shared;
+    node->node = cur->node;
+    node->offset = cur->offset;
+    node->next = nullptr;
+    *tail = node;
+    tail = &node->next;
+    cur = cur->next;
+  }
+
+  return head;
+}
+
+bool mapPageFromVme(VME *vme, uint64_t pageVa) {
+  auto pte = leafPte(pageVa);
+  if ((pte != nullptr) && ((*pte & presentBit) != 0)) {
+    return true;
+  }
+
+  auto frame = physMem.alloc();
+  auto frameWords = (uint64_t *)VA(frame);
+  for (uint64_t i = 0; i < FRAME_SIZE / sizeof(uint64_t); i++) {
+    frameWords[i] = 0;
+  }
+
+  if (!(vme->node == StrongRef<Node>{})) {
+    auto framePtr = (char *)VA(frame);
+    auto fileOffset = uint32_t(vme->offset + (pageVa - vme->start));
+    vme->node->read_all(fileOffset, FRAME_SIZE, framePtr);
+  }
+
+  pte = leafPte(pageVa);
+  if ((pte != nullptr) && ((*pte & presentBit) != 0)) {
+    physMem.free(frame);
+    return true;
+  }
+
+  impl::map(VPN(VA(pageVa)), frame, true, true);
+  return true;
+}
+
+bool ensureMappedPage(uint64_t pageVa) {
+  auto pte = leafPte(pageVa);
+  if ((pte != nullptr) && ((*pte & presentBit) != 0)) {
+    return true;
+  }
+
+  auto vmeCursor = privateVmes;
+  while (vmeCursor != nullptr) {
+    if ((pageVa >= vmeCursor->start) && (pageVa < vmeCursor->end)) {
+      return mapPageFromVme(vmeCursor, pageVa);
+    }
+    vmeCursor = vmeCursor->next;
+  }
+
+  VME *sharedMatch = nullptr;
+  sharedLock.lock();
+  vmeCursor = sharedVmes;
+  while (vmeCursor != nullptr) {
+    if ((pageVa >= vmeCursor->start) && (pageVa < vmeCursor->end)) {
+      sharedMatch = vmeCursor;
+      break;
+    }
+    vmeCursor = vmeCursor->next;
+  }
+  sharedLock.unlock();
+
+  if (sharedMatch != nullptr) {
+    return mapPageFromVme(sharedMatch, pageVa);
+  }
+
+  return false;
+}
+
 } // namespace impl
+
+bool VMM::is_user_range_mapped(uint64_t start, uint64_t size) {
+  using namespace impl;
+
+  if (size == 0) {
+    return true;
+  }
+
+  if (start < 0x1000 || start >= UINT64_C(0x0000800000000000)) {
+    return false;
+  }
+
+  auto last = start + size - 1;
+  if (last < start || last >= UINT64_C(0x0000800000000000)) {
+    return false;
+  }
+
+  auto firstPage = start & ~(FRAME_SIZE - 1);
+  auto lastPage = last & ~(FRAME_SIZE - 1);
+
+  for (auto va = firstPage;; va += FRAME_SIZE) {
+    if (!ensureMappedPage(va)) {
+      return false;
+    }
+    if (va == lastPage) {
+      break;
+    }
+  }
+
+  return true;
+}
+
+void VMM::init_heap_break(uint64_t initial_break) {
+  auto canonical = initial_break;
+  if (canonical < 0x1000) {
+    canonical = 0x1000;
+  }
+  impl::heapStart = canonical;
+  impl::heapBreak = canonical;
+}
+
+uint64_t VMM::get_heap_break() { return impl::heapBreak; }
+
+int VMM::set_heap_break(uint64_t new_break) {
+  using namespace impl;
+
+  if (heapStart == 0 || heapBreak == 0) {
+    return -1;
+  }
+
+  if (new_break < heapStart || new_break >= UINT64_C(0x0000800000000000)) {
+    return -1;
+  }
+
+  auto old_break = heapBreak;
+  auto old_end = roundUpPage(old_break);
+  auto new_end = roundUpPage(new_break);
+
+  if (new_end > old_end) {
+    map_range(VA(old_end), new_end - old_end, true, true);
+  } else if (new_end < old_end) {
+    unmapRange(new_end, old_end);
+  }
+
+  heapBreak = new_break;
+  return 0;
+}
+
+bool VMM::snapshot_for_fork(ForkState &out) {
+  using namespace impl;
+
+  auto parentCr3Ppn = PPN(get_cr3() >> LOG_FRAME_SIZE);
+  auto parentPml4 = (uint64_t *)VA(parentCr3Ppn);
+
+  auto childCr3Ppn = physMem.alloc();
+  auto childPml4 = (uint64_t *)VA(childCr3Ppn);
+
+  for (uint64_t i = 0; i < 512; i++) {
+    childPml4[i] = 0;
+  }
+
+  for (uint64_t i = 0; i < 256; i++) {
+    auto entry = parentPml4[i];
+    if ((entry & presentBit) == 0) {
+      continue;
+    }
+    auto child = cloneTableSubtree(entryPpn(entry), 2);
+    childPml4[i] = (child.ppn() << LOG_FRAME_SIZE) | (entry & ~addressMask);
+  }
+
+  for (uint64_t i = 256; i < 512; i++) {
+    childPml4[i] = parentPml4[i];
+  }
+
+  out.cr3 = PA(childCr3Ppn).pa();
+  out.private_vmes = clonePrivateVmes();
+  out.heap_start = heapStart;
+  out.heap_break = heapBreak;
+  return true;
+}
+
+void VMM::install_fork_state(const ForkState &state) {
+  impl::privateVmes = (impl::VME *)state.private_vmes;
+  impl::heapStart = state.heap_start;
+  impl::heapBreak = state.heap_break;
+}
 
 /*
  * A simplified mmap implementation
@@ -407,57 +633,7 @@ pageFaultHandler(uintptr_t cr2, impl::PageFaultTrapFrame *trap_frame) {
   ASSERT(!is_disabled());
 
   auto faultPage = cr2 & ~(FRAME_SIZE - 1);
-
-  auto mapFromVme = [&](VME *vme) {
-    auto pte = leafPte(faultPage);
-    if ((pte != nullptr) && ((*pte & presentBit) != 0)) {
-      return;
-    }
-
-    auto frame = physMem.alloc();
-    auto frameWords = (uint64_t *)VA(frame);
-    for (uint64_t i = 0; i < FRAME_SIZE / sizeof(uint64_t); i++) {
-      frameWords[i] = 0;
-    }
-
-    if (!(vme->node == StrongRef<Node>{})) {
-      auto framePtr = (char *)VA(frame);
-      auto fileOffset = uint32_t(vme->offset + (faultPage - vme->start));
-      vme->node->read_all(fileOffset, FRAME_SIZE, framePtr);
-    }
-
-    pte = leafPte(faultPage);
-    if ((pte != nullptr) && ((*pte & presentBit) != 0)) {
-      physMem.free(frame);
-      return;
-    }
-
-    impl::map(VPN(VA(faultPage)), frame, true, true);
-  };
-
-  auto vmeCursor = privateVmes;
-  while (vmeCursor) {
-    if ((cr2 >= vmeCursor->start) && (cr2 < vmeCursor->end)) {
-      mapFromVme(vmeCursor);
-      return;
-    }
-    vmeCursor = vmeCursor->next;
-  }
-
-  VME *sharedMatch = nullptr;
-  sharedLock.lock();
-  vmeCursor = sharedVmes;
-  while (vmeCursor) {
-    if ((cr2 >= vmeCursor->start) && (cr2 < vmeCursor->end)) {
-      sharedMatch = vmeCursor;
-      break;
-    }
-    vmeCursor = vmeCursor->next;
-  }
-  sharedLock.unlock();
-
-  if (sharedMatch != nullptr) {
-    mapFromVme(sharedMatch);
+  if (ensureMappedPage(faultPage)) {
     return;
   }
 

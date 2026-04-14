@@ -53,10 +53,24 @@ extern uint64_t common_cr3;
 namespace VMM {
 enum flags { MAP_SHARED = 1, MAP_ANONYMOUS = 2};
 
+struct ForkState {
+  uint64_t cr3 = 0;
+  void *private_vmes = nullptr;
+  uint64_t heap_start = 0;
+  uint64_t heap_break = 0;
+};
+
 extern void init_system();
 extern void init_core();
 extern void init_thread();
 extern void fini_thread();
+
+bool is_user_range_mapped(uint64_t start, uint64_t size);
+void init_heap_break(uint64_t initial_break);
+uint64_t get_heap_break();
+int set_heap_break(uint64_t new_break);
+bool snapshot_for_fork(ForkState &out);
+void install_fork_state(const ForkState &state);
 
 uintptr_t silly_mmap(uint64_t length, StrongRef<Node> file, uint64_t offset);
 

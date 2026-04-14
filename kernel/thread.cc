@@ -56,6 +56,14 @@ TCB *TCB::alloc() {
   tcb->the_stack = nullptr;
   tcb->saved_rsp = 0;
   tcb->disable_preemption_count = 1;
+  tcb->pid = 0;
+  tcb->fork_user_rsp = 0;
+  for (uint64_t i = 0; i < 15; i++) {
+    tcb->fork_frame[i] = 0;
+  }
+  tcb->fork_heap_start = 0;
+  tcb->fork_heap_break = 0;
+  tcb->fork_private_vmes = nullptr;
   return tcb;
 }
 
@@ -73,6 +81,11 @@ void TCB::dealloc(TCB *tcb) {
 }
 
 void TCB::post_switch() {
+  auto current = TCB::current();
+  if (current != nullptr && !current->is_idle && current->stack_bottom != nullptr) {
+    PerCore::get()->tss.rsp0 = (uint64_t)current->stack_bottom;
+  }
+
   switch (action) {
   case Action::Ready:
     ASSERT(!is_idle);

@@ -7,17 +7,28 @@
 #include "vmm.h"
 #include "x86_64.h"
 
+extern "C" void syscall_register_init_process();
+
+Ext2 *g_sys_fs_ptr = nullptr;
+
+
 void kernel_main() {
   StrongRef<BlockIO> ide{new RamDisk("/boot/ramdisk", 0)};
   auto fs = StrongRef<Ext2>::make(ide);
+  g_sys_fs_ptr = fs.operator->();
 
   KPRINT("block size is ?\n", Dec(fs->get_block_size()));
   KPRINT("inode size is ?\n", Dec(fs->get_inode_size()));
 
   auto init = fs->find(fs->root, "init");
 
-  auto entry = ELF::load(init);
+  uint64_t loaded_end = 0;
+  auto entry = ELF::load(init, &loaded_end);
   KPRINT("entry: ?\n", entry);
+
+  auto initial_break = (loaded_end + FRAME_SIZE - 1) & ~(FRAME_SIZE - 1);
+
+  VMM::init_heap_break(initial_break);
 
   auto rsp = UINT64_C(0x7ffffff0000);
 
@@ -32,8 +43,11 @@ void kernel_main() {
 
   auto me = impl::TCB::current();
   auto stack_bottom = me->stack_bottom;
+
   disable();
   PerCore::get()->tss.rsp0 = (uint64_t)stack_bottom;
+
+  syscall_register_init_process();
 
   switch_to_user(entry, rsp);
 }

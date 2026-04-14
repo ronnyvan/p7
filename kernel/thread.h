@@ -60,6 +60,14 @@ struct TCB {
   // thread work, nullptr for the idle thread
   Fun *fun;
 
+  // process/fork bookkeeping
+  int pid = 0;
+  uint64_t fork_user_rsp = 0;
+  uint64_t fork_frame[15] = {0};
+  uint64_t fork_heap_start = 0;
+  uint64_t fork_heap_break = 0;
+  void *fork_private_vmes = nullptr;
+
   static inline TCB *current() { return (TCB *)rdfsbase(); }
 
   TCB() = delete;
