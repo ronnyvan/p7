@@ -545,7 +545,7 @@ void *VMM::mmap(void *addr, size_t length, int prot, int flags,
 int VMM::munmap(void *addr, size_t length) {
   using namespace impl;
 
-  auto start = uint64_t(addr);
+  auto start = uint64_t(addr); 
   if ((start % FRAME_SIZE) != 0) {
     return -1;
   }
